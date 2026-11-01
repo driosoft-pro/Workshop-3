@@ -1,0 +1,40 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Nix ----
+result
+result-*
+.direnv/
+
+# ---- Secretos / entorno (versionar solo .env.example) ----
+.env
+.env.*
+!.env.example
+
+# ---- Datos y volúmenes (data/raw, models/model.pkl y data/streaming SÍ se versionan) ----
+data/processed/*.parquet
+pgdata/
+kafka-data/
+superset_home/
+airflow/logs/
+airflow/airflow.db
+great_expectations/uncommitted/
+*.log
+
+# ---- Editor / SO ----
+.vscode/
+.idea/
+.DS_Store
+
+# ---- Agent-tooling ----
+AGENTS.md
+.agents/
+.scratch/
+
