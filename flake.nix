@@ -1,9 +1,13 @@
 ###############################################################
-# flake.nix — Laboratorio de Kafka
-# Python 3.12 + uv + Jupyter + Confluent-Kafka + Docker/Podman
+# flake.nix — Workshop 3: Streaming ETL con Kafka + ML
+# Python 3.12 (Nix) + uv (.venv) + Podman/Docker Compose
+#
+# Uso:  nix develop            (entorno completo)
+#       podman-compose up -d   (infraestructura, ver docker-compose.yml)
+#       docker compose up -d   (alternativa equivalente si usas Docker)
 ###############################################################
 {
-  description = "Laboratorio Kafka — Python (uv) + Docker/Podman";
+  description = "Workshop 3 — Streaming ETL con Apache Kafka y ML (World Happiness 2015-2019)";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
 
@@ -22,13 +26,18 @@
         packages = [
           pythonEnv
           pkgs.uv
-          # pkgs.docker-compose se omite a proposito: en este equipo `docker` es
-          # el shim de podman, y si docker-compose (Go) esta en el PATH toma el
-          # control y no ve los contenedores de podman ("service not running").
-          # Sin el, `docker compose ...` delega en podman-compose y funciona.
+          # --- Contenedores: Podman (rootless) o Docker -------------------
+          # En este equipo `docker` es el shim de podman. NO se incluye
+          # pkgs.docker-compose (Go): si está en el PATH toma el control de
+          # `docker compose` y no ve los contenedores de podman. Sin él,
+          # `docker compose ...` delega en podman-compose y funciona igual.
+          pkgs.podman
           pkgs.podman-compose
-          pkgs.kcat
-          pkgs.jq
+          # --- Utilidades de inspección del pipeline ---
+          pkgs.kcat        # kcat -L -b localhost:29092  (listar topics)
+          pkgs.jq          # inspeccionar payloads JSON
+          pkgs.postgresql  # cliente psql para consultar PostgreSQL
+          pkgs.git
         ];
 
         LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
@@ -50,6 +59,7 @@
           fi
           source .venv/bin/activate
           export PYTHONUNBUFFERED=1
+          export PYTHONPATH="$PWD"
 
           # 2) dependencias de requirements.txt (solo si cambió el archivo)
           if [ -n "$REQ_HASH" ] && [ "$(cat .venv/.req-hash 2>/dev/null)" != "$REQ_HASH" ]; then
@@ -62,37 +72,32 @@
             fi
           fi
 
-          if [ ! -d "$HOME/.local/share/jupyter/kernels/kafka-lab" ]; then
-            python -m ipykernel install --user --name=kafka-lab \
-              --display-name "Python (kafka-lab .venv)" > /dev/null 2>&1 || true
+          # 3) kernel de Jupyter (notebooks/eda.ipynb, notebooks/model_training.ipynb)
+          if [ ! -d "$HOME/.local/share/jupyter/kernels/workshop3" ]; then
+            python -m ipykernel install --user --name=workshop3 \
+              --display-name "Python (workshop3 .venv)" > /dev/null 2>&1 || true
           fi
 
           echo ""
           echo "╔══════════════════════════════════════════════════════════╗"
-          echo "║  Laboratorio Kafka — Python (uv) + Docker/Podman         ║"
+          echo "║  Workshop 3 — Streaming ETL con Kafka + ML               ║"
           echo "╚══════════════════════════════════════════════════════════╝"
           echo ""
           echo "Python:  $(python --version 2>&1)"
           echo "uv:      $(uv --version)"
-          echo "kcat:    $(kcat -V 2>&1 | head -1)"
+          echo "podman:  $(podman --version 2>&1)"
+          echo "psql:    $(psql --version 2>&1 | cut -d' ' -f1-2)"
           echo ""
-          echo "Comandos:"
-          echo "  docker compose up -d            Levantar broker Kafka (alias de podman)"
-          echo "  podman-compose up -d            Levantar broker Kafka (directo)"
-          echo "  docker compose ps               Estado de los servicios"
-          echo "  docker compose logs -f kafka    Logs del broker"
-          echo "  docker compose exec kafka ...   Ejecutar Kafka CLI dentro del contenedor"
-          echo "  kcat -L -b localhost:9092       Listar topics"
-          echo "  python producer.py              Producer (Part-3 del lab)"
-          echo "  python consumer.py              Consumer (Part-3 del lab)"
-          echo "  python continuous_producer.py   Producer continuo (Mini Challenge)"
-          echo "  python monitor_consumer.py      Monitor con metricas (Mini Challenge)"
-          echo "  uv pip install <pkg>            Instalar paquete extra en .venv"
-          echo "  requirements.txt                Dependencias Python (uv las instala al entrar)"
-          echo "  pytest                          Correr tests (aun sin tests: no tests ran)"
-          echo "  jupyter lab                     JupyterLab"
+          echo "Quick start (paso a paso completo en README.md):"
+          echo "  podman-compose up -d kafka kafka-init postgres   # infra (o: docker compose up -d ...)"
+          echo "  python -m src.harmonize                          # Parte A: dataset unificado + GE"
+          echo "  python -m src.train                              # Parte A: model.pkl + stream_events.csv"
+          echo "  pytest -q                                        # contrato de eventos"
+          echo "  python kafka/consumer.py                         # terminal A (inferencia)"
+          echo "  python kafka/producer.py --delay 0.5             # terminal B (stream)"
+          echo "  psql postgresql://happiness:happiness@localhost:5432/happiness"
           echo ""
-          echo "Guia completa: docs/commands.md   |   Lab: docs/ETL-G1_2026-2_U3-Activity-1_ApacheKafkaFlow.md"
+          echo "Extras:  uv pip install <pkg>  ·  jupyter lab  ·  kcat -L -b localhost:29092"
           echo ""
         '';
       };
