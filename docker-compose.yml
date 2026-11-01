@@ -1,0 +1,245 @@
+# ============================================================================
+# docker-compose.yml — Workshop 3 infrastructure
+#
+# Works with BOTH engines from the same file:
+#   podman-compose up -d kafka kafka-init postgres     # NixOS / rootless Podman
+#   docker compose up -d    kafka kafka-init postgres  # Docker
+#
+# Core services (kafka, kafka-init, postgres) are always available.
+# Heavy services are behind profiles to save RAM:
+#   --profile monitoring : prometheus + grafana
+#   --profile dashboards : superset
+#   --profile airflow    : airflow (scheduler, webserver, db)
+# ============================================================================
+
+services:
+  # ---------------------------------------------------------------- Kafka ---
+  # Single KRaft broker (no ZooKeeper). Two listeners:
+  #   INTERNAL  kafka:9092    -> containers talk to each other
+  #   EXTERNAL  localhost:29092 -> producer/consumer on the host
+  kafka:
+    image: docker.io/apache/kafka:3.8.0
+    container_name: kafka
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # keep the container quiet
+      KAFKA_LOG4J_ROOT_LOGLEVEL: WARN
+    volumes:
+      # Persist topic data + consumer offsets across container recreations
+      # (otherwise `podman-compose up` resets offsets while PostgreSQL keeps
+      #  its rows -> (topic, partition, offset) keys would collide).
+      - kafka-data:/tmp/kafka-logs
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  # Creates the required topic: happiness-events, 3 partitions, RF 1
+  kafka-init:
+    image: docker.io/apache/kafka:3.8.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092
+        --create --if-not-exists
+        --topic happiness-events --partitions 3 --replication-factor 1 &&
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092
+        --describe --topic happiness-events
+
+  # ------------------------------------------------------------ PostgreSQL ---
+  # On first boot runs sql/create_tables.sql + sql/kpis.sql (initdb.d).
+  postgres:
+    image: docker.io/library/postgres:16
+    container_name: happiness-postgres
+    environment:
+      POSTGRES_USER: happiness
+      POSTGRES_PASSWORD: happiness
+      POSTGRES_DB: happiness
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/create_tables.sql:/docker-entrypoint-initdb.d/01_create_tables.sql:ro
+      - ./sql/kpis.sql:/docker-entrypoint-initdb.d/02_kpis.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U happiness -d happiness"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  # ------------------------------------------------- Optional: monitoring ---
+  # Prometheus scrapes the consumer's /metrics endpoint on the host.
+  # NOTE (Docker only): add
+  #     extra_hosts: ["host.containers.internal:host-gateway"]
+  # to this service if `host.containers.internal` does not resolve.
+  prometheus:
+    image: docker.io/prom/prometheus:v2.54.1
+    profiles: ["monitoring"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      - "host.containers.internal:host-gateway"
+
+  grafana:
+    image: docker.io/grafana/grafana:11.2.0
+    profiles: ["monitoring"]
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+  # -------------------------------------------------- Optional: dashboards ---
+  # Official image lacks the PostgreSQL driver -> build a thin derived image.
+  superset:
+    build:
+      context: ./dashboards/superset
+    profiles: ["dashboards"]
+    ports:
+      - "8088:8088"
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-workshop3-dev-secret}
+      SUPERSET_LOAD_EXAMPLES: "no"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - superset_home:/app/superset_home
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["/bin/sh", "-c", "superset run -h 0.0.0.0 -p 8088"]
+    restart: unless-stopped
+
+  superset-init:
+    build:
+      context: ./dashboards/superset
+    profiles: ["dashboards"]
+    restart: "no"
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-workshop3-dev-secret}
+      SUPERSET_LOAD_EXAMPLES: "no"
+    volumes:
+      - superset_home:/app/superset_home
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["/bin/sh", "-c", "superset db upgrade && superset fab create-admin
+      --username admin --firstname admin --lastname admin --email admin@example.com
+      --password admin && superset init"]
+
+  # ------------------------------------------------------- Optional: batch ---
+  # Airflow orchestrates ONLY Part A (batch). The streaming consumer is a
+  # long-running process and deliberately NOT part of any DAG.
+  airflow-db:
+    image: docker.io/library/postgres:16
+    profiles: ["airflow"]
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  airflow-init:
+    build:
+      context: ./airflow
+    profiles: ["airflow"]
+    restart: "no"
+    # Rootless Podman maps container uid 0 -> your host uid, so the default
+    # (0) lets Airflow write into the bind-mounted repo and keeps files owned
+    # by you. On rootful Docker/Linux set AIRFLOW_UID=$(id -u) in .env.
+    user: "${AIRFLOW_UID:-0}:0"
+    environment: &airflow-env
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+      AIRFLOW__CORE__FERNET_KEY: workshop3-fernet-key
+      AIRFLOW__WEBSERVER__SECRET_KEY: workshop3-webserver-secret
+      AIRFLOW_UID: ${AIRFLOW_UID:-0}
+      # Keep HOME on the image's home dir: the pip packages from the image
+      # live in /home/airflow/.local (Python user-site resolves via HOME).
+      HOME: /home/airflow
+      PYTHONPATH: /workspace
+      PYTHONUNBUFFERED: "1"
+    volumes: &airflow-volumes
+      - ./airflow/dags:/opt/airflow/dags
+      - ./:/workspace
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+    # The apache/airflow entrypoint only special-cases `bash`/`python`
+    # (anything else is passed to `airflow`), so the shell must be `bash`.
+    command: ["bash", "-c", "airflow db migrate &&
+      airflow users create --username admin --password admin
+      --firstname admin --lastname admin --role Admin
+      --email admin@example.com || true"]
+
+  airflow-scheduler:
+    build:
+      context: ./airflow
+    profiles: ["airflow"]
+    user: "${AIRFLOW_UID:-0}:0"
+    environment: *airflow-env
+    volumes: *airflow-volumes
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    command: ["airflow", "scheduler"]
+    restart: unless-stopped
+
+  airflow-webserver:
+    build:
+      context: ./airflow
+    profiles: ["airflow"]
+    user: "${AIRFLOW_UID:-0}:0"
+    ports:
+      - "8080:8080"
+    environment: *airflow-env
+    volumes: *airflow-volumes
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    command: ["airflow", "webserver", "--port", "8080"]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  kafka-data:
+  prometheus-data:
+  grafana-data:
+  superset_home:
+  airflow-dbdata:
