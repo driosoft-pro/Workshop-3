@@ -1,0 +1,47 @@
+{
+  "model_version": "happiness-linreg-20261101T190214Z",
+  "algorithm": "LinearRegression",
+  "pipeline": [
+    "SimpleImputer(strategy=median)",
+    "StandardScaler",
+    "LinearRegression"
+  ],
+  "features": [
+    "gdp",
+    "family",
+    "health",
+    "freedom",
+    "generosity",
+    "corruption"
+  ],
+  "target": "happiness_score",
+  "split": "GroupShuffleSplit(test_size=0.3, random_state=42, groups=country)",
+  "mae": 0.4318,
+  "rmse": 0.5619,
+  "r2": 0.7838,
+  "comparison": {
+    "linear_regression_group_split": {
+      "mae": 0.4318,
+      "rmse": 0.5619,
+      "r2": 0.7838
+    },
+    "linear_regression_random_split": {
+      "mae": 0.4487,
+      "rmse": 0.5846,
+      "r2": 0.7263
+    },
+    "random_forest_group_split": {
+      "mae": 0.4771,
+      "rmse": 0.6074,
+      "r2": 0.7474
+    }
+  },
+  "n_rows": 782,
+  "n_train": 542,
+  "n_test": 240,
+  "train_countries": 114,
+  "test_countries": 50,
+  "trained_at": "2026-11-01T19:02:14+00:00",
+  "sklearn_version": "1.9.1",
+  "dataset": "data/processed/unified_happiness.parquet"
+}
