@@ -35,6 +35,11 @@ great_expectations/uncommitted/
 
 # ---- Agent-tooling ----
 AGENTS.md
+CLAUDE.md
+GEMINI.md
 .agents/
+.agent/
+.claude/
+.opencode/
 .scratch/
 
