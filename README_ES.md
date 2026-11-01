@@ -407,62 +407,102 @@ de errores.
 
 ## 9. Instrucciones de ejecución
 
-> Todos los comandos de Python corren dentro del shell de Nix. Ambas
-> herramientas de contenedores funcionan: reemplaza `podman-compose` por
-> `docker compose` si usas Docker.
+> Puedes ejecutar y administrar todo el ciclo de vida del proyecto mediante los scripts unificados de automatización:
+> - **Linux / NixOS / macOS:** `./run.sh [opción]`
+> - **Windows (cmd/powershell):** `run.bat [opción]`
+>
+> Ambos scripts detectan automáticamente **Podman** o **Docker**, ofrecen modos interactivo o automático, gestionan el ciclo de vida de los contenedores y registran auditorías completas en `logs/`.
 
-### 0. Prerequisitos
+### 0. Inicio rápido mediante scripts unificados (`run.sh` / `run.bat`)
 
+| Comando (Linux / NixOS) | Comando (Windows) | Acción |
+|---|---|---|
+| `./run.sh` | `run.bat` | **Menú Interactivo** con todas las opciones |
+| `./run.sh auto` | `run.bat auto` | **Ejecución Automática Completa** (infra + batch + tests + streaming + KPIs) |
+| `./run.sh step` | `run.bat step` | **Modo Paso a Paso Interactivo** (solicita confirmación antes de cada etapa) |
+| `./run.sh start` | `run.bat start` | Iniciar infraestructura base (Kafka + PostgreSQL) |
+| `./run.sh start-all` | `run.bat start-all` | Iniciar todos los servicios (Kafka, Postgres, Airflow, Superset, Prometheus, Grafana) |
+| `./run.sh stop` | `run.bat stop` | Detener los contenedores en ejecución |
+| `./run.sh clean` | `run.bat clean` | Eliminar contenedores y volúmenes persistentes (`down -v`) |
+| `./run.sh recreate` | `run.bat recreate` | Limpieza completa + reinicio de infra + re-armonización y re-entrenamiento desde cero |
+| `./run.sh test` | `run.bat test` | Ejecutar suite de pruebas de contrato (`pytest -q`) |
+| `./run.sh airflow-success` | `run.bat airflow-success` | Ejecutar DAG de Airflow de **Éxito / Happy Path** (`happiness_batch_training`) |
+| `./run.sh airflow-fail` | `run.bat airflow-fail` | Ejecutar DAG de Airflow con **Fallo Controlado** (`happiness_batch_failure_demo`) |
+| `./run.sh status` | `run.bat status` | Ver estado de salud de contenedores y conteo de filas en PostgreSQL |
+
+### 1. Directorio de Logs y Auditoría (`logs/`)
+
+Cada ejecución de `run.sh` o `run.bat` guarda un registro detallado en el directorio `logs/`:
+- `logs/run_YYYYMMDD_HHMMSS.log`: Archivo cronológico con cada comando, salida y código de retorno para auditoría.
+- `logs/latest.log`: Enlace simbólico que apunta a la ejecución más reciente para inspección inmediata (`tail -f logs/latest.log`).
+
+---
+
+### 2. Escenarios de Airflow (Ejecución Exitosa vs. Fallo Controlado)
+
+El repositorio incluye **dos DAGs de Airflow independientes** para demostrar la resiliencia y el aislamiento de errores:
+
+1. **`happiness_batch_training` (Camino Feliz / Éxito Completo):**
+   - Archivo: [`airflow/dags/happiness_batch_training.py`](airflow/dags/happiness_batch_training.py)
+   - Flujo: `harmonize` → `validate_ge` (29 expectativas pasan al 100%) → `train` (LinearRegression) → `export_stream`.
+   - Resultado: Todas las tareas finalizan en estado `SUCCESS`. Los artefactos de modelo y streams se actualizan limpiamente.
+   - Ejecución:
+     ```bash
+     ./run.sh airflow-success
+     # o manualmente:
+     podman-compose --profile airflow exec airflow-scheduler airflow dags test happiness_batch_training
+     ```
+
+2. **`happiness_batch_failure_demo` (Demostración de Fallo Controlado):**
+   - Archivo: [`airflow/dags/happiness_batch_training_failure_demo.py`](airflow/dags/happiness_batch_training_failure_demo.py)
+   - Flujo: `harmonize` → `validate_ge` (se inyecta deliberadamente un valor fuera de escala: `happiness_score = 99.0`).
+   - Comportamiento: Great Expectations detecta el defecto y lanza `RuntimeError`. Airflow marca `validate_ge` como `FAILED` y frena en seco el pipeline.
+   - Protección: Las tareas posteriores `train` y `export_stream` quedan en estado `UPSTREAM_FAILED` y **nunca se ejecutan**, garantizando que el modelo y los eventos jamás se corrompan con datos anómalos.
+   - Ejecución:
+     ```bash
+     ./run.sh airflow-fail
+     # o manualmente:
+     podman-compose --profile airflow exec airflow-scheduler airflow dags test happiness_batch_failure_demo
+     ```
+
+---
+
+### 3. Ejecución Manual Paso a Paso (CLI / Shell de Nix)
+
+Si prefieres ejecutar cada instrucción manualmente por terminal:
+
+#### 3.1 Prerequisitos
 - [Nix](https://nixos.org/download/) (con flakes habilitados)
 - Podman **o** Docker
 - Git
 
-### 1. Clonar y entrar al entorno
-
+#### 3.2 Entrar al entorno e iniciar infraestructura
 ```bash
-git clone <repo-url> && cd workshop-3
 nix develop            # Python 3.12 + uv + podman + podman-compose + kcat + psql
-                       # crea .venv e instala requirements.txt automáticamente
 cp .env.example .env   # ajusta solo si tus puertos/DSN difieren
-```
 
-### 2. Levantar la infraestructura
-
-```bash
-podman-compose up -d kafka kafka-init postgres   # Kafka (3p/RF1) + PostgreSQL 16
-# verificar:
-kcat -L -b localhost:29092                      # topic happiness-events, 3 particiones
+# Levantar Kafka y PostgreSQL:
+podman-compose up -d kafka kafka-init postgres
+# Verificar topic:
+kcat -L -b localhost:29092
 ```
 
 Servicios opcionales (perfiles):
-
 ```bash
-podman-compose --profile monitoring up -d       # Prometheus + Grafana
+podman-compose --profile monitoring up -d           # Prometheus + Grafana
 podman-compose --profile dashboards up -d --build   # Superset (:8088)
 podman-compose --profile airflow up -d --build      # Airflow (:8080, admin/admin)
 ```
 
-### 3. Pipeline batch (Parte A) — dataset, validación, modelo
-
+#### 3.3 Pipeline batch (Parte A)
 ```bash
-python -m src.harmonize   # → data/processed/unified.*  (782 filas, 0 nulos)
+python -m src.harmonize   # → data/processed/unified.* (782 filas, 0 nulos)
 python -m src.validate    # → 29 Great Expectations, sale con ≠ 0 si falla
-python -m src.train       # → models/model.pkl + model_metadata.json
-                          #   + data/streaming/stream_events.csv (240)
-                          #   + data/streaming/invalid_events.csv (10)
+python -m src.train       # → models/model.pkl + model_metadata.json + data/streaming/*.csv
 pytest -q                 # → 56 passed (contrato de eventos + armonización)
 ```
 
-O ejecuta los mismos pasos como DAG de Airflow:
-
-```bash
-podman-compose --profile airflow up -d --build
-# UI: http://localhost:8080 (admin/admin) → DAG happiness_batch_training
-podman-compose --profile airflow exec airflow-scheduler \
-    airflow dags test happiness_batch_training
-```
-
-### 4. Streaming (Parte B) — dos terminales, mismo shell de Nix
+#### 3.4 Streaming (Parte B) — dos terminales, mismo shell de Nix
 
 ```bash
 # terminal A — consumer (raw → validar → predecir → hechos → commit)
