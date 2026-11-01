@@ -102,8 +102,10 @@ print(f"countries in BOTH splits: {len(train_countries & test_countries)} (must 
 # ## 3. Pipeline: imputer → scaler → regressor
 #
 # All learned preprocessing travels **inside** `model.pkl` (no train/serving
-# skew). `ColumnTransformer` selects columns *by name*, but the consumer
-# still builds the DataFrame in the exact `FEATURES` order.
+# skew). Column *order* comes from the contract (`FEATURES`), which both this
+# notebook and the consumer build explicitly — so the pipeline itself stays a
+# plain imputer → scaler → regressor (and `model.pkl` stays a plain sklearn
+# pickle, loadable outside Airflow where `dill` would otherwise seep in).
 
 # %%
 pipe = build_pipeline()

@@ -36,7 +36,6 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.compose import ColumnTransformer
 
 from src import config
 from src.contract import FEATURES, TARGET_FIELD, REQUIRED
@@ -46,27 +45,21 @@ TARGET = "happiness_score"  # column name in the unified dataset
 
 
 def build_pipeline() -> Pipeline:
-    """Imputer + scaler + regressor, selected by column *name*."""
+    """Imputer -> scaler -> regressor.
+
+    No ``ColumnTransformer``: both sides already build the frame in the fixed
+    ``FEATURES`` order (training: ``df[FEATURES]``; consumer:
+    ``DataFrame(..., columns=FEATURES)`` from the contract), so selecting by
+    name would be redundant. It also keeps ``model.pkl`` a plain sklearn
+    pickle — Airflow task processes import ``dill`` (an apache-airflow
+    dependency), which otherwise captures ``slice`` pickling inside
+    ``ColumnTransformer.output_indices_`` and makes the artifact unloadable
+    outside Airflow.
+    """
     return Pipeline(
         [
-            (
-                "prep",
-                ColumnTransformer(
-                    [
-                        (
-                            "num",
-                            Pipeline(
-                                [
-                                    ("imp", SimpleImputer(strategy="median")),
-                                    ("sc", StandardScaler()),
-                                ]
-                            ),
-                            FEATURES,
-                        )
-                    ],
-                    remainder="drop",
-                ),
-            ),
+            ("imp", SimpleImputer(strategy="median")),
+            ("sc", StandardScaler()),
             ("model", LinearRegression()),
         ]
     )
@@ -118,24 +111,8 @@ def evaluate_splits(
 
     rf = Pipeline(
         [
-            (
-                "prep",
-                ColumnTransformer(
-                    [
-                        (
-                            "num",
-                            Pipeline(
-                                [
-                                    ("imp", SimpleImputer(strategy="median")),
-                                    ("sc", StandardScaler()),
-                                ]
-                            ),
-                            FEATURES,
-                        )
-                    ],
-                    remainder="drop",
-                ),
-            ),
+            ("imp", SimpleImputer(strategy="median")),
+            ("sc", StandardScaler()),
             (
                 "model",
                 RandomForestRegressor(

@@ -33,7 +33,9 @@
           # `docker compose ...` delega en podman-compose y funciona igual.
           pkgs.podman
           pkgs.podman-compose
-          # --- Utilidades de inspección del pipeline ---
+          # --- Utilidades de inspección y librerías del pipeline ---
+          pkgs.rdkafka     # cliente nativo C para confluent-kafka
+          pkgs.pkg-config
           pkgs.kcat        # kcat -L -b localhost:29092  (listar topics)
           pkgs.jq          # inspeccionar payloads JSON
           pkgs.postgresql  # cliente psql para consultar PostgreSQL
@@ -43,6 +45,9 @@
         LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
           pkgs.stdenv.cc.cc.lib
           pkgs.zlib
+          pkgs.glib
+          pkgs.libGL
+          pkgs.openssl
         ];
 
         shellHook = ''
@@ -50,6 +55,14 @@
           REQ_FILE="$PWD/requirements.txt"
           REQ_HASH=""
           [ -f "$REQ_FILE" ] && REQ_HASH="$(sha256sum "$REQ_FILE" | cut -d' ' -f1)"
+
+          # Socket Podman / Docker en NixOS (rootless)
+          USER_PODMAN_SOCK="/run/user/$(id -u)/podman/podman.sock"
+          if [ -S "$USER_PODMAN_SOCK" ]; then
+            export CONTAINER_HOST="unix://$USER_PODMAN_SOCK"
+            [ -z "$DOCKER_HOST" ] && export DOCKER_HOST="unix://$USER_PODMAN_SOCK"
+            alias podman-remote="podman --remote"
+          fi
 
           # 1) .venv contra el intérprete actual de Nix
           if [ ! -d .venv ] || [ "$(readlink -f .venv/bin/python 2>/dev/null)" != "$PY_CURRENT" ]; then

@@ -1,11 +1,11 @@
 _defect,_expected_status,_drop_field,_null_field,_raw,event_id,country,year,gdp,family,health,freedom,generosity,corruption,actual_happiness_score,event_time
-missing_field,INVALID_SCHEMA,event_id,,,E9001,Colombia,2019,1.2,0.8,0.9,0.6,0.3,0.1,6.2,2026-11-01T19:02:14
-country_null,INVALID_SCHEMA,,country,,E9002,Colombia,2019,1.2,0.8,0.9,0.6,0.3,0.1,6.2,2026-11-01T19:02:14
-year_not_integer,INVALID_SCHEMA,,,,E9003,Colombia,twenty nineteen,1.2,0.8,0.9,0.6,0.3,0.1,6.2,2026-11-01T19:02:14
-feature_not_numeric,INVALID_SCHEMA,,,,E9004,Colombia,2019,not-a-number,0.8,0.9,0.6,0.3,0.1,6.2,2026-11-01T19:02:14
-negative_gdp,INVALID_VALUES,,,,E9005,Colombia,2019,-0.5,0.8,0.9,0.6,0.3,0.1,6.2,2026-11-01T19:02:14
-score_out_of_range,INVALID_VALUES,,,,E9006,Colombia,2019,1.2,0.8,0.9,0.6,0.3,0.1,99.0,2026-11-01T19:02:14
+missing_field,INVALID_SCHEMA,event_id,,,E9001,Colombia,2019,1.2,0.8,0.9,0.6,0.3,0.1,6.2,2026-11-01T20:16:29
+country_null,INVALID_SCHEMA,,country,,E9002,Colombia,2019,1.2,0.8,0.9,0.6,0.3,0.1,6.2,2026-11-01T20:16:29
+year_not_integer,INVALID_SCHEMA,,,,E9003,Colombia,twenty nineteen,1.2,0.8,0.9,0.6,0.3,0.1,6.2,2026-11-01T20:16:29
+feature_not_numeric,INVALID_SCHEMA,,,,E9004,Colombia,2019,not-a-number,0.8,0.9,0.6,0.3,0.1,6.2,2026-11-01T20:16:29
+negative_gdp,INVALID_VALUES,,,,E9005,Colombia,2019,-0.5,0.8,0.9,0.6,0.3,0.1,6.2,2026-11-01T20:16:29
+score_out_of_range,INVALID_VALUES,,,,E9006,Colombia,2019,1.2,0.8,0.9,0.6,0.3,0.1,99.0,2026-11-01T20:16:29
 bad_event_time,INVALID_VALUES,,,,E9007,Colombia,2019,1.2,0.8,0.9,0.6,0.3,0.1,6.2,30/12/2026 15:30:00
-nan_feature,INVALID_VALUES,,,,E9008,Colombia,2019,1.2,0.8,0.9,0.6,0.3,,6.2,2026-11-01T19:02:14
-null_feature,INVALID_SCHEMA,,freedom,,E9009,Colombia,2019,1.2,0.8,0.9,,0.3,0.1,6.2,2026-11-01T19:02:14
-malformed_json,INVALID_SCHEMA,,,"{""event_id"": ""E9010"", ""country"": ""Colombia"", ""year"": 2019, ""gdp"": 1.2",E9010,Colombia,2019,1.2,0.8,0.9,0.6,0.3,0.1,6.2,2026-11-01T19:02:14
+nan_feature,INVALID_VALUES,,,,E9008,Colombia,2019,1.2,0.8,0.9,0.6,0.3,,6.2,2026-11-01T20:16:29
+null_feature,INVALID_SCHEMA,,freedom,,E9009,Colombia,2019,1.2,0.8,0.9,,0.3,0.1,6.2,2026-11-01T20:16:29
+malformed_json,INVALID_SCHEMA,,,"{""event_id"": ""E9010"", ""country"": ""Colombia"", ""year"": 2019, ""gdp"": 1.2",E9010,Colombia,2019,1.2,0.8,0.9,0.6,0.3,0.1,6.2,2026-11-01T20:16:29
