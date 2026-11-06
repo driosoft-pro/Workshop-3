@@ -107,8 +107,19 @@ infra_start() {
     $COMPOSE_CMD up -d kafka kafka-init postgres 2>&1 | tee -a "$LOG_FILE"
 
     log "INFO" "Esperando a que Postgres y Kafka reporten estado saludable (healthy)..."
-    sleep 4
-    log "OK" "Infraestructura base iniciada exitosamente."
+    local kh="missing" ph="missing" i
+    for i in $(seq 1 30); do
+        kh=$($CONTAINER_CLI inspect -f '{{.State.Health.Status}}' kafka 2>/dev/null || echo missing)
+        ph=$($CONTAINER_CLI inspect -f '{{.State.Health.Status}}' happiness-postgres 2>/dev/null || echo missing)
+        if [ "$kh" = "healthy" ] && [ "$ph" = "healthy" ]; then
+            log "OK" "Infraestructura base iniciada exitosamente (kafka + postgres healthy)."
+            return 0
+        fi
+        sleep 4
+    done
+    log "ERROR" "Infraestructura no saludable tras 120s: kafka=$kh postgres=$ph"
+    log "ERROR" "Revisa: $CONTAINER_CLI logs kafka"
+    return 1
 }
 
 infra_start_all() {
@@ -116,6 +127,18 @@ infra_start_all() {
     log "STEP" "Iniciando todos los servicios (Kafka, Postgres, Airflow, Superset, Prometheus, Grafana)..."
     $COMPOSE_CMD --profile monitoring --profile dashboards --profile airflow up -d --build 2>&1 | tee -a "$LOG_FILE"
     log "OK" "Todos los servicios fueron levantados."
+
+    log "STEP" "Creando/actualizando el dashboard de Superset (Happiness KPIs)..."
+    local i
+    for i in $(seq 1 30); do
+        curl -sf -o /dev/null -m 5 http://localhost:8088/login/ 2>/dev/null && break
+        sleep 4
+    done
+    if run_py "dashboards/superset/bootstrap_dashboards.py"; then
+        log "OK" "Dashboard 'Happiness KPIs' -> http://localhost:8088/superset/dashboard/1/"
+    else
+        log "WARN" "No se pudo crear el dashboard de Superset (máncalo a mano: python dashboards/superset/bootstrap_dashboards.py)"
+    fi
 }
 
 infra_stop() {

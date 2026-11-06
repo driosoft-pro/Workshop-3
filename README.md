@@ -403,6 +403,108 @@ Dashboards **query the PostgreSQL views** (`sql/kpis.sql`) — never CSV files.
 | Pipeline health | `vw_pipeline_status` | Event counts per `processing_status` — the contract validation in action. |
 | Model comparison | `vw_kpi_by_model` | MAE per model version (enabled by `dim_model`). |
 
+### Services: URLs and credentials
+
+| Service | URL / Host | Login / credentials |
+|---|---|---|
+| **Airflow** | http://localhost:8080 | `admin` / `admin` |
+| **Superset** | http://localhost:8088 | `admin` / `admin` |
+| **Grafana** | http://localhost:3000 | `admin` / `admin` |
+| **Prometheus** | http://localhost:9090 | no login (target `happiness-ml-consumer`) |
+| **PostgreSQL (project)** | `localhost:5432` | user `happiness` · password `happiness` · db `happiness` |
+| **PostgreSQL (Airflow)** | `airflow-db:5432` (host `localhost:5432`) | user `airflow` · password `airflow` · db `airflow` |
+| **Kafka (from the host)** | `localhost:29092` | PLAINTEXT |
+| **Kafka (container-to-container)** | `kafka:9092` | PLAINTEXT |
+| **Consumer metrics** | http://localhost:8000/metrics | — |
+
+Start them with the menu option 4, or per profile:
+
+```bash
+podman-compose --profile airflow    up -d --build   # Airflow :8080
+podman-compose --profile dashboards up -d --build   # Superset :8088
+podman-compose --profile monitoring up -d           # Prometheus :9090 + Grafana :3000
+```
+
+Validate Kafka:
+
+```bash
+# topic: 3 partitions, RF 1
+podman exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic happiness-events
+# consumer group offsets vs. end of partition
+podman exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --group happiness-ml-team --describe
+# last raw events (kcat ships in the flake)
+nix develop --command kcat -L -b localhost:29092 -t happiness-events -C -o -5 -e
+```
+
+Validate the data:
+
+```bash
+podman exec -it happiness-postgres psql -U happiness -d happiness
+```
+```sql
+select processing_status, count(*) from raw_happiness_events group by 1;
+select count(*) from fact_predictions;   -- must equal the VALID row count
+select * from vw_pipeline_status;
+```
+
+### Expected service status
+
+| Service | Expected state | How to check |
+|---|---|---|
+| Airflow :8080 | `webserver` + `scheduler` up, `init` Exited(0) | `http://localhost:8080/login/` → 200; DAGs listed |
+| Superset :8088 | up, `init` Exited(0) (admin created) | `http://localhost:8088/login/` → 200 |
+| Grafana :3000 | up | `http://localhost:3000/api/health` ok; datasource `Prometheus → http://prometheus:9090` |
+| Prometheus :9090 | up | `http://localhost:9090/api/v1/targets` → target `happiness-ml-consumer` = `up` |
+| Kafka :29092 | healthy | topic `happiness-events`, 3 partitions / RF 1 |
+| PostgreSQL :5432 | healthy | 5 tables + 6 `vw_*` views |
+| Consumer :8000 | running | `events_consumed_total{status=…}` in `/metrics` |
+
+DAGs ship **paused**: unpause them from the UI (▶) or use menu options 9/10.
+
+### Database connection (DBeaver CE)
+
+| Field | Value |
+|---|---|
+| Host | `localhost` |
+| Port | `5432` |
+| Database | `happiness` |
+| Username | `happiness` |
+| Password | `happiness` |
+| Driver | PostgreSQL |
+
+Tables: `raw_happiness_events`, `fact_predictions`, `dim_country`, `dim_date`,
+`dim_model` + views `vw_kpi_*`, `vw_pipeline_status`.
+A second database on the same instance holds Airflow metadata:
+db `airflow` · user `airflow` · password `airflow`.
+
+### Superset dashboard (bootstrap)
+
+Superset ships **empty**: connection, datasets, charts and dashboard are
+created by an idempotent script (menu option 4 runs it automatically):
+
+```bash
+python dashboards/superset/bootstrap_dashboards.py           # create/refresh
+python dashboards/superset/bootstrap_dashboards.py --verify  # query checks only
+```
+
+It creates the `happiness` connection (PostgreSQL), 6 datasets (5 physical
+views +1 pre-sorted virtual one), 8 charts (2 big numbers, 4 tables, 1 bar
+chart, 1 pie chart) and the dashboard **Happiness KPIs**, then runs every
+chart query through the API and checks the dashboard↔chart link.
+
+Open it at <http://localhost:8088/superset/dashboard/1/> (`admin`/`admin`).
+
+### Grafana dashboards (provisioned)
+
+Three dashboards are provisioned from `monitoring/grafana/dashboards/*.json`
+(Grafana re-scans every 30 s, no import needed):
+
+| Dashboard | Panels | What it shows |
+|---|---|---|
+| `Happiness Pipeline Health` | 5 | events/min by status, total consumed, invalid/min, latency p95, MAE (5m) |
+| `Happiness ML Quality` | 8 | MAE cumulative, predictions scored, invalid ratio, uptime, error p50/p95/p99, share of errors > 0.5, latency quantiles, invalids by status |
+| `Happiness Consumer Runtime` | 6 | CPU %, RSS/VMS, open FDs, GC collections, GC objects, uptime |
+
 ### Where to look
 
 | URL | What |
