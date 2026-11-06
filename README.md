@@ -66,36 +66,49 @@ that works with **both Podman (`podman-compose`) and Docker (`docker compose`)**
 
 ## 2. Architecture
 
-```
-                OFFLINE / BATCH  (orchestrated by Airflow DAG or CLI)
- CSVs 2015-2019 ─► harmonize ─► Great Expectations ─► features + split ─► train
-        │              │                │                                    │
-        │              ▼                ▼                                    ▼
-        │      data/processed/    fails loudly                      models/model.pkl
-        │      unified.*.parquet  (stops DAG)                       + model_metadata.json
-        │                                                           + data/streaming/*.csv
-        │
-                STREAMING  (long-running services)
- data/streaming/stream_events.csv ─► producer.py ─► Kafka topic `happiness-events`
-        (+ invalid_events.csv)          │            (3 partitions, key = country)
-        --inject-invalid ───────────────┘                   │
-                                                            ▼
-                                        consumer.py  (group `happiness-ml-team`)
-                                         1. INSERT raw_happiness_events  (RECEIVED)
-                                         2. validate contract → VALID | INVALID_SCHEMA |
-                                         │                    INVALID_VALUES
-                                         3. features in the training order
-                                         4. model.pkl → predict (or PREDICTION_ERROR)
-                                         5. INSERT fact_predictions (+ dim_*)
-                                         6. manual offset commit (at-least-once)
-                                                │                │
-                                                ▼                ▼
-                              PostgreSQL ◄── views vw_*    /metrics ◄── Prometheus
-                                │                              │
-                    ┌───────────┴───────────┐                  ▼
-                    ▼                       ▼               Grafana :3000
-              Superset :8088          dashboards/           (pipeline health)
-              (business KPIs)         kpi_charts.py → PNG
+```mermaid
+graph TD
+    %% Node styles
+    classDef storage fill:#f9dbbd,stroke:#d99b58,stroke-width:2px,color:#000;
+    classDef process fill:#cfe2f3,stroke:#6fa8dc,stroke-width:2px,color:#000;
+    classDef kafka fill:#d9ead3,stroke:#93c47d,stroke-width:2px,color:#000;
+    classDef alert fill:#f4cccc,stroke:#e06666,stroke-width:2px,color:#000;
+    classDef dashboard fill:#fff2cc,stroke:#ffd966,stroke-width:2px,color:#000;
+
+    %% OFFLINE SECTION
+    subgraph Offline [OFFLINE / BATCH - Orchestrated by Airflow DAG or CLI]
+        CSV[CSVs 2015-2019]:::storage --> Harm[harmonize]:::process
+        Harm --> GX[Great Expectations]:::process
+        GX --> Feat[features + split]:::process
+        Feat --> Train[train]:::process
+
+        Harm -.-> Parquet[(data/processed/<br/>unified.*.parquet)]:::storage
+        GX -.-> Fail>fails loudly<br/>stops DAG]:::alert
+        Train -.-> Model[(models/model.pkl<br/>+ model_metadata.json<br/>+ data/streaming/*.csv)]:::storage
+    end
+
+    %% STREAMING SECTION
+    subgraph Streaming [STREAMING - Long-running services]
+        StreamData[data/streaming/stream_events.csv<br/>+ invalid_events.csv<br/>--inject-invalid]:::storage --> Prod[producer.py]:::process
+        
+        Prod --> Topic{Kafka topic: happiness-events<br/>3 partitions, key = country}:::kafka
+        
+        Topic --> Cons["<b>consumer.py</b> (group: happiness-ml-team)<br/><br/>1. INSERT raw_happiness_events (RECEIVED)<br/>2. validate contract → VALID | INVALID_SCHEMA...<br/>3. features in the training order<br/>4. model.pkl → predict (or PREDICTION_ERROR)<br/>5. INSERT fact_predictions (+ dim_*)<br/>6. manual offset commit (at-least-once)"]:::process
+
+        Cons --> PG[(PostgreSQL)]:::storage
+        Cons --> Metrics([/metrics])
+
+        PG --> Vistas[views vw_*]
+        Vistas --> Superset[Superset :8088<br/>Business KPIs]:::dashboard
+        Vistas --> PNG[dashboards/<br/>kpi_charts.py → PNG]:::dashboard
+
+        Metrics --> Prom[Prometheus]:::process
+        Prom --> Grafana[Grafana :3000<br/>Pipeline health]:::dashboard
+    end
+
+    %% Connections between Batch and Streaming
+    Model -.->|Feeds simulated data| StreamData
+    Model -.->|Loads model for inference| Cons
 ```
 
 ### Design decisions
@@ -283,15 +296,29 @@ Example message (as stored in `raw_happiness_events.payload_json`):
 
 ### Validation states
 
-```
-            ┌──────────────────────────► INVALID_SCHEMA   (missing/extra field, bad type,
-RECEIVED ───┤                               malformed JSON, null where not allowed)
-(raw first) │
-            ├──────────────────────────► INVALID_VALUES   (value outside its range)
-            │
-            └──► features ─► predict ───► VALID            (fact row written)
-                                  │
-                                  └───► PREDICTION_ERROR  (exception in predict)
+```mermaid
+graph LR
+    %% Node styles
+    classDef neutral fill:#cfe2f3,stroke:#6fa8dc,stroke-width:2px,color:#000;
+    classDef error fill:#f4cccc,stroke:#e06666,stroke-width:2px,color:#000;
+    classDef success fill:#d9ead3,stroke:#93c47d,stroke-width:2px,color:#000;
+
+    %% Nodes
+    R["<b>RECEIVED</b><br/>(raw first)"]:::neutral
+    IS["<b>INVALID_SCHEMA</b><br/>(missing/extra field, bad type,<br/>malformed JSON, null where not allowed)"]:::error
+    IV["<b>INVALID_VALUES</b><br/>(value outside its range)"]:::error
+    FEAT["features"]:::neutral
+    PRED["predict"]:::neutral
+    VAL["<b>VALID</b><br/>(fact row written)"]:::success
+    PE["<b>PREDICTION_ERROR</b><br/>(exception in predict)"]:::error
+
+    %% Relationships
+    R --> IS
+    R --> IV
+    R -->|Passes contract| FEAT
+    FEAT --> PRED
+    PRED --> VAL
+    PRED --> PE
 ```
 
 - **Every** message is written to `raw_happiness_events` *before* validation,
@@ -326,30 +353,27 @@ automatically at first Postgres boot
 (`docker-entrypoint-initdb.d/01_create_tables.sql`); `sql/kpis.sql` creates
 the views the same way.
 
-```
-                         ┌─────────────────────┐
-                         │  raw_happiness_events│  grain: 1 consumed Kafka message
-                         │  (audit / staging)   │  (topic, partition, offset) unique
-                         └──────────┬──────────┘
-                                    │ raw_event_id (PK, referenced by facts)
-        ┌───────────────────────────┼──────────────────────────────┐
-        │                           │                              │
-┌───────┴────────┐        ┌─────────┴────────┐           ┌─────────┴────────┐
-│ dim_country    │        │ dim_date         │           │ dim_model        │
-│ grain: 1       │        │ grain: 1 day     │           │ grain: 1 model   │
-│ country        │        │ (event_time)     │           │ version          │
-│ (region)       │        │ date_id = YYYYMMDD│          │ (algorithm, ver) │
-└───────┬────────┘        └─────────┬────────┘           └─────────┬────────┘
-        │                           │                              │
-        └───────────────┬───────────┴──────────────────────────────┘
-                        ▼
-              ┌───────────────────┐
-              │ fact_predictions  │  grain: 1 valid event → 1 prediction
-              │ actual_score      │  of 1 country-year by 1 model version
-              │ predicted_score   │
-              │ prediction_error  │  = predicted − actual (signed)
-              │ abs_prediction_err│  → MAE KPI
-              └───────────────────┘
+```mermaid
+graph TD
+    %% Node styles
+    classDef raw fill:#f9dbbd,stroke:#d99b58,stroke-width:2px,color:#000;
+    classDef dim fill:#cfe2f3,stroke:#6fa8dc,stroke-width:2px,color:#000;
+    classDef fact fill:#d9ead3,stroke:#93c47d,stroke-width:2px,color:#000;
+
+    %% Table Nodes
+    RAW["<b>raw_happiness_events</b><br/>(audit / staging)<hr/><i>Grain: 1 consumed Kafka message<br/>(topic, partition, offset) unique</i>"]:::raw
+
+    DIM_C["<b>dim_country</b><hr/><i>Grain: 1 country<br/>(region)</i>"]:::dim
+    DIM_D["<b>dim_date</b><hr/><i>Grain: 1 day (event_time)<br/>date_id = YYYYMMDD</i>"]:::dim
+    DIM_M["<b>dim_model</b><hr/><i>Grain: 1 model version<br/>(algorithm, ver)</i>"]:::dim
+
+    FACT["<b>fact_predictions</b><hr/>actual_score<br/>predicted_score<br/>prediction_error = predicted - actual (signed)<br/>abs_prediction_err → MAE KPI<hr/><i>Grain: 1 valid event → 1 prediction<br/>of 1 country-year by 1 model version</i>"]:::fact
+
+    %% Relationships (Foreign Keys)
+    RAW -- "raw_event_id (PK)" --> FACT
+    DIM_C -- "country_id" --> FACT
+    DIM_D -- "date_id" --> FACT
+    DIM_M -- "model_id" --> FACT
 ```
 
 | Table | Grain | Purpose |
