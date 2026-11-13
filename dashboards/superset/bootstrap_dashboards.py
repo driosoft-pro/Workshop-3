@@ -11,7 +11,7 @@ What it creates:
   * database connection  "happiness"        (PostgreSQL, host `postgres`)
   * datasets             vw_kpi_* / vw_pipeline_status (+1 virtual, pre-sorted)
   * charts               2 big numbers, 4 tables, 1 bar chart, 1 pie chart
-  * dashboard            "Happiness KPIs"   (all charts in a 24-col grid)
+  * dashboard            "Happiness KPIs"   (all charts in a 12-col grid)
 """
 from __future__ import annotations
 
@@ -69,10 +69,13 @@ def agg(col: str, op: str = "AVG") -> dict:
 
 
 # (chart_name, dataset, viz_type, params)
+# NOTE: the single-value cards use `big_number_total` (no time column needed).
+# The legacy `big_number` is a trendline chart and needs a temporal column,
+# which these views do not have.
 CHARTS = [
-    ("Overall MAE", "vw_kpi_avg_error", "big_number",
+    ("Overall MAE", "vw_kpi_avg_error", "big_number_total",
      {"metric": agg("mae"), "time_range": "No filter", "y_axis_format": ".3f"}),
-    ("Predictions scored", "vw_kpi_pred_vs_actual", "big_number",
+    ("Predictions scored", "vw_kpi_pred_vs_actual", "big_number_total",
      {"metric": agg("actual_score", "COUNT"), "time_range": "No filter",
       "y_axis_format": ",.0f"}),
     ("KPI summary (MAE / RMSE / bias)", "vw_kpi_avg_error", "table",
@@ -92,23 +95,37 @@ CHARTS = [
       "groupby": ["observation_year"], "row_limit": 100,
       "time_range": "No filter", "show_legend": True, "bar_stacked": False,
       "x_ticks_layout": "auto", "y_axis_format": "SMART_NUMBER"}),
+    # NOTE: the Pie control panel declares `metric` (singular), not `metrics`.
+    # Pie/buildQuery.ts does `...(sort_by_metric && { orderby: [[metric, false]] })`
+    # and `sort_by_metric` defaults to true, so a missing `metric` sends
+    # `orderby: [[null, false]]` -> 400 "Field may not be null.".
     ("Events by processing status", "vw_pipeline_status", "pie",
-     {"metrics": [agg("n_events", "SUM")], "groupby": ["processing_status"],
+     {"metric": agg("n_events", "SUM"), "groupby": ["processing_status"],
       "row_limit": 100, "show_labels": True, "labels_outside": True,
       "label_type": "key_percent", "legend_type": "scroll"}),
 ]
 
-# chart_name -> (x, y, width, height) on a 24-column grid
+# chart_name -> (x, y, width, height)
+#
+# Superset grid rules (these were the cause of the empty/clipped charts):
+#   * width  is in COLUMNS of a 12-column grid  (12 = full width, 6 = half).
+#   * height is in units of 8 px                (50 = 400 px, the default).
+# Charts sharing the same `y` go in the same ROW, so keep `y` distinct per row.
 LAYOUT = {
-    "Overall MAE": (0, 0, 6, 4),
-    "Predictions scored": (6, 0, 6, 4),
-    "Events by processing status": (12, 0, 12, 8),
-    "Avg actual vs predicted by year": (0, 8, 12, 8),
-    "KPI summary (MAE / RMSE / bias)": (12, 8, 12, 8),
-    "Top 15 countries by MAE": (0, 16, 8, 8),
-    "MAE by model version": (8, 16, 8, 8),
-    "Pipeline status (contract validation)": (16, 16, 8, 8),
+    # row 1: KPI cards (144 px tall)
+    "Overall MAE": (0, 0, 3, 18),
+    "Predictions scored": (3, 0, 3, 18),
+    "KPI summary (MAE / RMSE / bias)": (6, 0, 6, 18),
+    # row 2: charts (400 px tall)
+    "Avg actual vs predicted by year": (0, 18, 6, 50),
+    "Events by processing status": (6, 18, 6, 50),
+    # row 3: tables (400 px tall)
+    "Top 15 countries by MAE": (0, 68, 5, 50),
+    "MAE by model version": (5, 68, 4, 50),
+    "Pipeline status (contract validation)": (9, 68, 3, 50),
 }
+
+GRID_COLUMNS = 12  # Superset's GRID_COLUMN_COUNT
 
 
 class Superset:
@@ -201,6 +218,8 @@ def position_json(chart_ids: dict[str, int]) -> str:
     ``layout[DASHBOARD_ROOT_ID]`` on the parsed position_json, so a wrong root
     key makes ``findFirstParentContainerId`` throw and the dashboard never
     finishes loading. ``HEADER_ID`` is injected by ``hydrate.js`` itself.
+
+    Sizes: ``width`` is in columns of a 12-column grid, ``height`` in 8 px units.
     """
     root, grid = "ROOT_ID", "GRID_ID"
     positions: dict[str, dict] = {
@@ -211,17 +230,23 @@ def position_json(chart_ids: dict[str, int]) -> str:
     for row_y in sorted({y for _, y, _, _ in LAYOUT.values()}):
         row_id = f"ROW-{row_y}"
         row_children: list[str] = []
-        for name, (x, y, w, h) in LAYOUT.items():
+        row_width = 0
+        for name, (x, y, w, h) in sorted(LAYOUT.items(), key=lambda kv: kv[1][0]):
             if y != row_y:
                 continue
             chart_id = f"CHART-{chart_ids[name]}"
             row_children.append(chart_id)
+            row_width += w
             positions[chart_id] = {
                 "type": "CHART", "id": chart_id, "children": [],
                 "parents": [root, grid, row_id],
                 "meta": {"chartId": chart_ids[name], "sliceName": name,
                          "width": w, "height": h},
             }
+        if row_width > GRID_COLUMNS:
+            raise ValueError(
+                f"LAYOUT row y={row_y} is {row_width} columns wide; "
+                f"the Superset grid only has {GRID_COLUMNS}")
         positions[row_id] = {
             "type": "ROW", "id": row_id, "children": row_children,
             "parents": [root, grid],
@@ -316,6 +341,7 @@ def main() -> None:
                 print(f"[ok] chart updated {name} (id={chart_id})")
             else:
                 chart = s.create("chart", payload, name)
+                existing_ch[name] = chart  # needed by position_json on 1st run
                 print(f"[ok] chart {name} (id={chart['id']})")
 
         # 4. dashboard ------------------------------------------------------
