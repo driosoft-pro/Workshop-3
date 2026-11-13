@@ -101,6 +101,10 @@ services:
   prometheus:
     image: docker.io/prom/prometheus:v2.54.1
     profiles: ["monitoring"]
+    # Same NixOS chown rationale as kafka: the prometheus-data volume ends up
+    # owned by the host user (1000) while the image runs as nobody (65534),
+    # which cannot write /prometheus -> exit(2) permission denied.
+    user: root
     ports:
       - "9090:9090"
     volumes:
@@ -112,6 +116,9 @@ services:
   grafana:
     image: docker.io/grafana/grafana:11.2.0
     profiles: ["monitoring"]
+    # Same NixOS chown rationale as kafka: grafana-data is owned by the host
+    # user (1000) while the image runs as uid 472 -> "readonly database".
+    user: root
     ports:
       - "3000:3000"
     environment:
@@ -130,6 +137,9 @@ services:
     build:
       context: ./dashboards/superset
     profiles: ["dashboards"]
+    # Same NixOS chown rationale as kafka: superset_home is owned by the host
+    # user (1000) while the image runs as `superset` -> readonly sqlite DB.
+    user: root
     ports:
       - "8088:8088"
     environment:
@@ -149,6 +159,8 @@ services:
       context: ./dashboards/superset
     profiles: ["dashboards"]
     restart: "no"
+    # Same NixOS chown rationale as superset above.
+    user: root
     environment:
       SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-workshop3-dev-secret}
       SUPERSET_LOAD_EXAMPLES: "no"
