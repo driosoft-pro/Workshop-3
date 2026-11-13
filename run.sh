@@ -189,9 +189,25 @@ infra_status() {
 # Enlaces de aplicaciones y estado detallado
 # ------------------------------------------------------------------------------
 # Estado de un contenedor: running | exited | missing
+resolve_container() {
+    local name matches
+    name="$($CONTAINER_CLI inspect -f '{{.Name}}' "$1" 2>/dev/null)" || name=""
+    if [ -z "$name" ]; then
+        # podman-compose nombra contenedores <proyecto>_<servicio>_1 -> resolver por label
+        # (puede haber contenedores viejos de otros proyectos: preferir los running)
+        matches="$($CONTAINER_CLI ps -a --filter "label=com.docker.compose.service=$1" \
+            --format '{{.Names}} {{.State}}' 2>/dev/null)"
+        name="$(echo "$matches" | awk '$2=="running"{print $1; exit}')"
+        [ -z "$name" ] && name="$(echo "$matches" | head -1 | awk '{print $1}')"
+    fi
+    echo "${name#/}"
+}
+
 container_state() {
-    local st
-    st="$($CONTAINER_CLI inspect -f '{{.State.Status}}' "$1" 2>/dev/null)" || st="missing"
+    local name st
+    name="$(resolve_container "$1")"
+    if [ -z "$name" ]; then echo "missing"; return 0; fi
+    st="$($CONTAINER_CLI inspect -f '{{.State.Status}}' "$name" 2>/dev/null)" || st="missing"
     echo "${st:-missing}"
 }
 
@@ -250,15 +266,16 @@ show_detail() {
 
     log "STEP" "1) Contenedores clave (estado / salud / reinicios):"
     printf "  %-20s %-10s %-14s %s\n" "CONTENEDOR" "ESTADO" "SALUD" "REINICIOS"
-    local c st hc rc
+    local c st hc rc rn
     for c in kafka happiness-postgres kafka-init airflow-webserver airflow-scheduler superset grafana prometheus; do
         st="$(container_state "$c")"
         if [ "$st" = "missing" ]; then
             printf "  %-20s %-10s %-14s %s\n" "$c" "-" "-" "no creado"
             continue
         fi
-        hc="$($CONTAINER_CLI inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}sin-healthcheck{{end}}' "$c" 2>/dev/null || echo "?")"
-        rc="$($CONTAINER_CLI inspect -f '{{.RestartCount}}' "$c" 2>/dev/null || echo "?")"
+        rn="$(resolve_container "$c")"
+        hc="$($CONTAINER_CLI inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}sin-healthcheck{{end}}' "$rn" 2>/dev/null || echo "?")"
+        rc="$($CONTAINER_CLI inspect -f '{{.RestartCount}}' "$rn" 2>/dev/null || echo "?")"
         printf "  %-20s %-10s %-14s %s\n" "$c" "$st" "$hc" "$rc"
     done
 
@@ -297,7 +314,7 @@ show_detail() {
     log "STEP" "6) Uso de las aplicaciones en la terminal:"
     {
         echo "  Airflow     : curl -s localhost:8080/health"
-        echo "                $CONTAINER_CLI exec airflow-scheduler airflow dags list"
+        echo "                $CONTAINER_CLI exec $(resolve_container airflow-scheduler) airflow dags list"
         echo "  Superset    : curl -s -o /dev/null -w '%{http_code}\n' localhost:8088/login/"
         echo "  Grafana     : curl -s localhost:3000/api/health"
         echo "  Prometheus  : curl -s localhost:9090/api/v1/targets | head -c 300"
