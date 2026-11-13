@@ -43,3 +43,7 @@ GEMINI.md
 .opencode/
 .scratch/
 
+
+# ---- Otros ----
+*.zip
+guion.md
