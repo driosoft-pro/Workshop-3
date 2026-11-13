@@ -186,6 +186,129 @@ infra_status() {
 }
 
 # ------------------------------------------------------------------------------
+# Enlaces de aplicaciones y estado detallado
+# ------------------------------------------------------------------------------
+# Estado de un contenedor: running | exited | missing
+container_state() {
+    local st
+    st="$($CONTAINER_CLI inspect -f '{{.State.Status}}' "$1" 2>/dev/null)" || st="missing"
+    echo "${st:-missing}"
+}
+
+# Estado de una URL: up | down
+http_state() {
+    if curl -sf -o /dev/null -m 3 "$1" 2>/dev/null; then echo "up"; else echo "down"; fi
+}
+
+# Opción 12: enlaces de todas las aplicaciones + si el proyecto está en ejecución
+show_links() {
+    detect_compose
+    echo ""
+    local ks ps
+    ks="$(container_state kafka)"
+    ps="$(container_state happiness-postgres)"
+
+    if [ "$ks" = "running" ] && [ "$ps" = "running" ]; then
+        log "OK" "PROYECTO EN EJECUCIÓN — enlaces de las aplicaciones:"
+    else
+        log "WARN" "PROYECTO NO EN EJECUCIÓN (kafka=$ks, postgres=$ps)."
+        log "INFO" "Ejecuta primero el proyecto: opción 1 (automática) u opción 4 (start-all)."
+    fi
+    echo ""
+
+    local -a apps=(
+        "Airflow|http://localhost:8080|airflow-webserver|admin/admin — orquestador batch (DAGs)"
+        "Airflow (dashboard)|http://localhost:8080/home|airflow-webserver|demo éxito: opción 9 · fallo: opción 10"
+        "Superset|http://localhost:8088|superset|admin/admin — dashboard 'Happiness KPIs'"
+        "Grafana|http://localhost:3000|grafana|admin/admin — salud del pipeline"
+        "Prometheus|http://localhost:9090|prometheus|sin login — métricas del consumer"
+        "Kafka (bootstrap)|localhost:29092|kafka|topic happiness-events (3 particiones)"
+        "PostgreSQL|localhost:5432|happiness-postgres|happiness/happiness — base happiness"
+        "Consumer ML /metrics|http://localhost:8000/metrics||corre en el host (kafka/consumer.py)"
+    )
+
+    printf "  %-24s %-36s %-10s %s\n" "APLICACIÓN" "URL" "ESTADO" "NOTAS"
+    printf "  %-24s %-36s %-10s %s\n" "------------------------" "------------------------------------" "----------" "-----"
+    local row name url ctr note state color
+    for row in "${apps[@]}"; do
+        IFS='|' read -r name url ctr note <<< "$row"
+        if [ -n "$ctr" ]; then
+            if [ "$(container_state "$ctr")" = "running" ]; then state="ACTIVO"; color="$GREEN"; else state="DETENIDO"; color="$RED"; fi
+        else
+            if [ "$(http_state "$url")" = "up" ]; then state="ACTIVO"; color="$GREEN"; else state="DETENIDO"; color="$RED"; fi
+        fi
+        printf "  %-24s %-36s ${color}%-10s${NC} %s\n" "$name" "$url" "$state" "$note"
+    done
+    echo ""
+    log "INFO" "Airflow / Superset / Grafana / Prometheus se levantan con la opción 4 (start-all)."
+}
+
+# Opción 13: estado detallado en terminal (contenedores, Kafka, modelo, apps)
+show_detail() {
+    detect_compose
+    echo ""
+
+    log "STEP" "1) Contenedores clave (estado / salud / reinicios):"
+    printf "  %-20s %-10s %-14s %s\n" "CONTENEDOR" "ESTADO" "SALUD" "REINICIOS"
+    local c st hc rc
+    for c in kafka happiness-postgres kafka-init airflow-webserver airflow-scheduler superset grafana prometheus; do
+        st="$(container_state "$c")"
+        if [ "$st" = "missing" ]; then
+            printf "  %-20s %-10s %-14s %s\n" "$c" "-" "-" "no creado"
+            continue
+        fi
+        hc="$($CONTAINER_CLI inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}sin-healthcheck{{end}}' "$c" 2>/dev/null || echo "?")"
+        rc="$($CONTAINER_CLI inspect -f '{{.RestartCount}}' "$c" 2>/dev/null || echo "?")"
+        printf "  %-20s %-10s %-14s %s\n" "$c" "$st" "$hc" "$rc"
+    done
+
+    echo ""
+    if [ "$(container_state kafka)" = "running" ]; then
+        log "STEP" "2) Kafka — topic happiness-events:"
+        $CONTAINER_CLI exec kafka /opt/kafka/bin/kafka-topics.sh \
+            --bootstrap-server localhost:9092 --describe --topic happiness-events 2>&1 | tee -a "$LOG_FILE" \
+            || log "WARN" "No se pudo describir el topic."
+        log "STEP" "3) Kafka — grupo de consumidores happiness-ml-team:"
+        $CONTAINER_CLI exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+            --bootstrap-server localhost:9092 --describe --group happiness-ml-team 2>&1 | tee -a "$LOG_FILE" \
+            || log "WARN" "Grupo sin offsets todavía (el consumer aún no ha corrido)."
+    else
+        log "WARN" "Kafka detenido — no se puede consultar el topic (ejecuta la opción 3)."
+    fi
+
+    echo ""
+    log "STEP" "4) Modelo ML:"
+    if [ -f "models/model.pkl" ]; then
+        ls -lh models/model.pkl | tee -a "$LOG_FILE"
+        grep -E '"(algorithm|model_version|mae|rmse|r2|n_rows|trained_at)"' models/model_metadata.json 2>/dev/null | tee -a "$LOG_FILE" || true
+    else
+        log "WARN" "models/model.pkl no existe — entrena con: python -m src.train (o ./run.sh recreate)"
+    fi
+
+    echo ""
+    log "STEP" "5) Consumer ML (corre en el host):"
+    if [ "$(http_state http://localhost:8000/metrics)" = "up" ]; then
+        log "OK" "Métricas activas -> http://localhost:8000/metrics"
+    else
+        log "WARN" "Consumer no está corriendo — arráncalo con: python kafka/consumer.py"
+    fi
+
+    echo ""
+    log "STEP" "6) Uso de las aplicaciones en la terminal:"
+    {
+        echo "  Airflow     : curl -s localhost:8080/health"
+        echo "                $CONTAINER_CLI exec airflow-scheduler airflow dags list"
+        echo "  Superset    : curl -s -o /dev/null -w '%{http_code}\n' localhost:8088/login/"
+        echo "  Grafana     : curl -s localhost:3000/api/health"
+        echo "  Prometheus  : curl -s localhost:9090/api/v1/targets | head -c 300"
+        echo "  Kafka       : $CONTAINER_CLI exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"
+        echo "  PostgreSQL  : PGPASSWORD=happiness psql -h localhost -U happiness -d happiness -c 'SELECT processing_status, count(*) FROM raw_happiness_events GROUP BY 1;'"
+        echo "  Consumer ML : curl -s localhost:8000/metrics | head"
+        echo "  Modelo      : python -c \"import joblib; m=joblib.load('models/model.pkl'); print(m)\""
+    } | tee -a "$LOG_FILE"
+}
+
+# ------------------------------------------------------------------------------
 # Ejecuciones de Airflow
 # ------------------------------------------------------------------------------
 run_airflow_success() {
@@ -386,9 +509,11 @@ show_menu() {
     echo -e "  ${BOLD}9)${NC} Airflow DAG: Demo Éxito (happiness_batch_training)"
     echo -e "  ${BOLD}10)${NC} Airflow DAG: Demo Error Controlado (happiness_batch_failure_demo)"
     echo -e "  ${BOLD}11)${NC} Ver Estado Actual (Contenedores + Base de Datos)"
+    echo -e "  ${BOLD}12)${NC} Ver Enlaces de las Aplicaciones (Airflow, Superset, Grafana, Prom...)"
+    echo -e "  ${BOLD}13)${NC} Estado Detallado (Contenedores, Kafka, Modelo, Apps)"
     echo -e "  ${BOLD}0)${NC} Salir"
     echo ""
-    echo -n "Seleccione una opción [0-11]: "
+    echo -n "Seleccione una opción [0-13]: "
     read -r opt
     case "$opt" in
         1) run_auto ;;
@@ -402,6 +527,8 @@ show_menu() {
         9) run_airflow_success ;;
         10) run_airflow_failure ;;
         11) infra_status ;;
+        12) show_links ;;
+        13) show_detail ;;
         0) exit 0 ;;
         *) log "WARN" "Opción inválida"; sleep 1; show_menu ;;
     esac
@@ -423,8 +550,10 @@ case "$MODE" in
     "airflow-success")  run_airflow_success ;;
     "airflow-fail")     run_airflow_failure ;;
     "status")           infra_status ;;
+    "links")            show_links ;;
+    "detail")           show_detail ;;
     "help"|"-h"|"--help")
-        echo "Uso: ./run.sh [auto|step|start|start-all|stop|clean|recreate|test|airflow-success|airflow-fail|status]"
+        echo "Uso: ./run.sh [auto|step|start|start-all|stop|clean|recreate|test|airflow-success|airflow-fail|status|links|detail]"
         echo "Sin argumentos abre el menú interactivo."
         ;;
     "")                 show_menu ;;
