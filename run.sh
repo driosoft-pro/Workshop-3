@@ -99,6 +99,73 @@ run_pytest() {
 }
 
 # ------------------------------------------------------------------------------
+# Consumer ML (proceso del host, expone /metrics en el puerto 8000)
+# ------------------------------------------------------------------------------
+CONSUMER_LOG="$LOGS_DIR/consumer.log"
+CONSUMER_PID_FILE="$LOGS_DIR/consumer.pid"
+
+# ¿El endpoint /metrics responde? (up | down)
+consumer_metrics_up() {
+    [ "$(http_state "http://localhost:${METRICS_PORT:-8000}/metrics")" = "up" ]
+}
+
+# Arranca kafka/consumer.py en segundo plano (idempotente) y espera a /metrics.
+start_consumer() {
+    if consumer_metrics_up; then
+        log "OK" "Consumer ML ya está corriendo -> http://localhost:${METRICS_PORT:-8000}/metrics"
+        return 0
+    fi
+
+    log "STEP" "Iniciando Consumer ML en el host (kafka/consumer.py)..."
+    if [ -n "${IN_NIX_SHELL:-}" ] || { [ -f "/etc/NIXOS" ] && [ -n "${VIRTUAL_ENV:-}" ]; }; then
+        nohup python kafka/consumer.py >> "$CONSUMER_LOG" 2>&1 </dev/null &
+    elif command -v nix >/dev/null 2>&1 && [ -f "flake.nix" ]; then
+        nohup nix develop --command python kafka/consumer.py >> "$CONSUMER_LOG" 2>&1 </dev/null &
+    elif [ -f ".venv/bin/python" ]; then
+        nohup .venv/bin/python kafka/consumer.py >> "$CONSUMER_LOG" 2>&1 </dev/null &
+    else
+        nohup python3 kafka/consumer.py >> "$CONSUMER_LOG" 2>&1 </dev/null &
+    fi
+    echo $! > "$CONSUMER_PID_FILE"
+
+    local i
+    for i in $(seq 1 15); do
+        if consumer_metrics_up; then
+            log "OK" "Consumer ML activo -> http://localhost:${METRICS_PORT:-8000}/metrics (log: ${CONSUMER_LOG#"$SCRIPT_DIR/"})"
+            return 0
+        fi
+        sleep 1
+    done
+    log "WARN" "El consumer no abrió /metrics en 15s — revisa ${CONSUMER_LOG#"$SCRIPT_DIR/"}"
+    tail -n 5 "$CONSUMER_LOG" 2>/dev/null | tee -a "$LOG_FILE" || true
+    return 0
+}
+
+# Detiene el consumer del host (pid file + respaldo por patrón).
+stop_consumer() {
+    local pid=""
+    if [ -f "$CONSUMER_PID_FILE" ]; then
+        pid="$(cat "$CONSUMER_PID_FILE" 2>/dev/null || true)"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            log "INFO" "Consumer ML detenido (pid $pid)."
+        fi
+        rm -f "$CONSUMER_PID_FILE"
+    fi
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -f "[k]afka/consumer.py" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# Reinicia el consumer (necesario tras reentrenar: cachea model.pkl en memoria).
+restart_consumer() {
+    stop_consumer
+    sleep 1
+    start_consumer
+}
+
+# ------------------------------------------------------------------------------
 # Comandos de ciclo de vida de Infraestructura
 # ------------------------------------------------------------------------------
 infra_start() {
@@ -113,6 +180,7 @@ infra_start() {
         ph=$($CONTAINER_CLI inspect -f '{{.State.Health.Status}}' happiness-postgres 2>/dev/null || echo missing)
         if [ "$kh" = "healthy" ] && [ "$ph" = "healthy" ]; then
             log "OK" "Infraestructura base iniciada exitosamente (kafka + postgres healthy)."
+            start_consumer
             return 0
         fi
         sleep 4
@@ -139,10 +207,14 @@ infra_start_all() {
     else
         log "WARN" "No se pudo crear el dashboard de Superset (máncalo a mano: python dashboards/superset/bootstrap_dashboards.py)"
     fi
+
+    # Prometheus scrapea host.containers.internal:8000 → sin consumer no hay series en Grafana
+    start_consumer
 }
 
 infra_stop() {
     detect_compose
+    stop_consumer
     log "STEP" "Deteniendo todos los contenedores..."
     $COMPOSE_CMD --profile monitoring --profile dashboards --profile airflow stop 2>&1 | tee -a "$LOG_FILE"
     log "OK" "Contenedores detenidos."
@@ -150,6 +222,7 @@ infra_stop() {
 
 infra_clean() {
     detect_compose
+    stop_consumer
     log "WARN" "Eliminando contenedores, redes y volúmenes persistentes..."
     $COMPOSE_CMD --profile monitoring --profile dashboards --profile airflow down -v --remove-orphans 2>&1 | tee -a "$LOG_FILE"
     log "OK" "Infraestructura y datos persistentes eliminados."
@@ -240,7 +313,7 @@ show_links() {
         "Prometheus|http://localhost:9090|prometheus|sin login — métricas del consumer"
         "Kafka (bootstrap)|localhost:29092|kafka|topic happiness-events (3 particiones)"
         "PostgreSQL|localhost:5432|happiness-postgres|happiness/happiness — base happiness"
-        "Consumer ML /metrics|http://localhost:8000/metrics||corre en el host (kafka/consumer.py)"
+        "Consumer ML /metrics|http://localhost:8000/metrics||corre en el host — lo levanta la opción 3"
     )
 
     printf "  %-24s %-36s %-10s %s\n" "APLICACIÓN" "URL" "ESTADO" "NOTAS"
@@ -409,24 +482,15 @@ run_auto() {
 
     # 4. Streaming Simulado
     log "STEP" "Paso 5: Transmisión Streaming Kafka (Consumidor + Productor con inválidos)..."
-    # Lanzar consumidor en background
-    log "INFO" "Iniciando consumidor en segundo plano..."
-    if [ -n "${IN_NIX_SHELL:-}" ] || [ -f "/etc/NIXOS" ] && [ -n "${VIRTUAL_ENV:-}" ]; then
-        python kafka/consumer.py >> "$LOG_FILE" 2>&1 &
-    elif command -v nix >/dev/null 2>&1 && [ -f "flake.nix" ]; then
-        nix develop --command python kafka/consumer.py >> "$LOG_FILE" 2>&1 &
-    else
-        python3 kafka/consumer.py >> "$LOG_FILE" 2>&1 &
-    fi
-    CONSUMER_PID=$!
-    sleep 3
+    # El modelo cambió en el Paso 3 y el consumer cachea model.pkl en memoria
+    log "INFO" "Reiniciando consumidor para cargar el modelo recién entrenado..."
+    restart_consumer
 
     log "INFO" "Iniciando productor emitiendo eventos de prueba y eventos inválidos de demo..."
     run_py "kafka/producer.py --delay 0.05 --run-id auto_demo --inject-invalid"
 
     # Dar tiempo a que el consumidor procese los últimos eventos y commitee
     sleep 4
-    kill "$CONSUMER_PID" 2>/dev/null || true
 
     # 5. Dashboard KPIs
     log "STEP" "Paso 6: Actualización de gráficos de KPIs desde PostgreSQL..."
@@ -480,19 +544,10 @@ run_step_by_step() {
     fi
 
     if confirm_step "6. Demostración Streaming (Productor + Consumidor)"; then
-        log "INFO" "Lanzando consumidor en segundo plano..."
-        if [ -n "${IN_NIX_SHELL:-}" ] || [ -f "/etc/NIXOS" ] && [ -n "${VIRTUAL_ENV:-}" ]; then
-            python kafka/consumer.py >> "$LOG_FILE" 2>&1 &
-        elif command -v nix >/dev/null 2>&1 && [ -f "flake.nix" ]; then
-            nix develop --command python kafka/consumer.py >> "$LOG_FILE" 2>&1 &
-        else
-            python3 kafka/consumer.py >> "$LOG_FILE" 2>&1 &
-        fi
-        CONSUMER_PID=$!
-        sleep 2
+        log "INFO" "Asegurando consumidor en segundo plano (queda activo tras la demo)..."
+        restart_consumer
         run_py "kafka/producer.py --delay 0.05 --run-id step_demo --inject-invalid"
         sleep 3
-        kill "$CONSUMER_PID" 2>/dev/null || true
     fi
 
     if confirm_step "7. Regenerar gráficos de KPIs (dashboards/kpi_charts.py)"; then
