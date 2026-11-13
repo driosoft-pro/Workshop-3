@@ -20,6 +20,11 @@ services:
   kafka:
     image: docker.io/apache/kafka:3.8.0
     container_name: kafka
+    # Run as container root: the image USER=appuser cannot write
+    # /opt/kafka/config once the NixOS activation script flattens ownership of
+    # ~/.local/share/containers (chown -R user:users). In rootless Podman,
+    # container root maps to the host user, so this is safe here.
+    user: root
     ports:
       - "29092:29092"
     environment:

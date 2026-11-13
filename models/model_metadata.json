@@ -1,5 +1,5 @@
 {
-  "model_version": "happiness-linreg-20261106T023916Z",
+  "model_version": "happiness-linreg-20261113T005942Z",
   "algorithm": "LinearRegression",
   "pipeline": [
     "SimpleImputer(strategy=median)",
@@ -41,7 +41,7 @@
   "n_test": 240,
   "train_countries": 114,
   "test_countries": 50,
-  "trained_at": "2026-11-06T02:39:16+00:00",
+  "trained_at": "2026-11-13T00:59:42+00:00",
   "sklearn_version": "1.9.1",
   "dataset": "data/processed/unified_happiness.parquet"
 }
